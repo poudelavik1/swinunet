@@ -15,7 +15,7 @@ train_swin_unet_hairline.py Compatibility training entry point
 
 This organization takes inspiration from https://github.com/Samir4456/pgat-length.
 The Swin U-Net training algorithms are preserved. See
-[architecture](docs/ARCHITECTURE.md) for details.
+[architecture](ARCHITECTURE.md) for details.
 
 The Conda environment holds Python dependencies. Clone the repository into a
 normal working directory, then activate the environment to run its code.
