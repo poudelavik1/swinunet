@@ -7,7 +7,7 @@ Swin encoder/decoder, BCE + Tversky + clDice, and tolerant crack metrics.
 configs/             Training defaults
 src/swinunet/        Data, model, loss, evaluation, plotting, training modules
 scripts/             Conda setup, training CLI, submission, epoch monitoring
-slurm/               ASL GPU batch job
+slurm/               ASL GPU check and training jobs
 inference/           Existing legacy CAD/inference work
 tests/               Workflow checks
 docs/               Architecture and server guide
@@ -25,6 +25,7 @@ git pull --ff-only
 bash scripts/setup_conda.sh
 source /opt/miniconda3/etc/profile.d/conda.sh
 conda activate swinunet
+sbatch slurm/gpu_check.sbatch   # optional ten-minute GPU test
 bash scripts/submit.sh "$HOME/split_80_10_10"
 ```
 

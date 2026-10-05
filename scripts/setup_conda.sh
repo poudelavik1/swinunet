@@ -16,4 +16,7 @@ python -m pip install -r "$ROOT/requirements.txt"
 python -m pip install --no-deps -e "$ROOT"
 python -m pip check
 python -c "import torch, torchvision, cv2, numpy, PIL, matplotlib; print('PyTorch:', torch.__version__); print('CUDA build:', torch.version.cuda)"
-echo "Environment ready. GPU access is verified inside the Slurm job."
+# Compute nodes may lack internet, so cache the default pretrained encoder here.
+python -c "from torchvision.models import Swin_T_Weights; Swin_T_Weights.DEFAULT.get_state_dict(progress=True)"
+mkdir -p "$ROOT/logs"
+echo "Environment ready. Verify the GPU with: sbatch slurm/gpu_check.sbatch"

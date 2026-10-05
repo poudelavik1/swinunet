@@ -6,7 +6,8 @@
 configs/training.toml       Core training defaults
 src/swinunet/              Data, models, losses, evaluation, plots, training
 scripts/                  Conda setup, submission, training CLI, epoch monitor
-slurm/train_swin.sbatch    ASL CUDA job
+slurm/train_swin.sbatch    ASL CUDA training job
+slurm/gpu_check.sbatch     Ten-minute GPU and environment check
 docs/ARCHITECTURE.md       Module responsibilities and inference limitations
 tests/                    Configuration and live CSV monitoring checks
 inference/                Existing legacy inference/CAD code
@@ -55,13 +56,23 @@ CUDA 12.6 wheels from the official PyTorch index. The GPU driver must support
 these wheels; the job tests a CUDA tensor operation before training. Override
 `TORCH_INDEX_URL` during setup if another CUDA build is required by the driver.
 Set `CONDA_SH` or `ENV_NAME` if using a different Conda installation or name.
-Installation requires internet access. The default pretrained encoder also
-requires downloaded weights in the user's torch cache on the compute node;
-if compute nodes have no internet, cache the weights from the login node first:
+Installation requires internet access. Setup also downloads the default
+pretrained Swin-T encoder into `~/.cache/torch`, so compute nodes need no
+internet. Another `--encoder` needs its own weights cached from the login node.
+
+## Check the GPU (once)
+
+Run from the repository root, then read the result once the job has left the queue:
 
 ```bash
-python -c "from torchvision.models import Swin_T_Weights; Swin_T_Weights.DEFAULT.get_state_dict(progress=True)"
+sbatch slurm/gpu_check.sbatch
+squeue -u "$USER"
+cat logs/gpu_check_JOBID.out logs/gpu_check_JOBID.err
 ```
+
+The output shows the GPU, driver, and PyTorch CUDA build and ends with
+`GPU check passed.` If CUDA is unavailable, rerun setup with a `TORCH_INDEX_URL`
+matching the driver version reported by `nvidia-smi`.
 
 ## Submit CUDA training
 
@@ -80,6 +91,8 @@ python scripts/train.py "$HOME/split_80_10_10" --output runs/manual --epochs 80
 ```
 
 Default request: ASL-gpu, one GPU, four CPU cores, 32 GB host RAM, two days.
+`sinfo -o "%P %l %m %c %G"` lists each partition's time limit, memory, cores,
+and GPUs; request a shorter job with `SBATCH_TIMELIMIT=1-00:00:00` before the command.
 Submission prints the job ID, result directory, and monitoring commands.
 Each new job uses a separate output directory and does not resume old weights.
 To customize training:

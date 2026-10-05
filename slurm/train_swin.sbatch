@@ -39,4 +39,6 @@ if [[ "${RESUME:-0}" == 1 ]]; then
     test -f "$OUTPUT_DIR/last.pt" || { echo "Resume checkpoint missing" >&2; exit 1; }
     args+=(--resume)
 fi
-srun python -u scripts/train.py "${args[@]}"
+# Run in the batch step, as in the ASL GPU example. Since Slurm 22.05 an srun
+# step ignores --cpus-per-task and would leave the data workers a single core.
+python -u scripts/train.py "${args[@]}"
