@@ -1,0 +1,117 @@
+# Swin U-Net hairline crack training on ASL
+
+The Conda environment holds Python dependencies. Clone the repository into a
+normal working directory, then activate the environment to run its code.
+The dataset already on the server is passed by its absolute path and is not uploaded to GitHub.
+
+## Upload to GitHub from Windows
+
+Repository: https://github.com/poudelavik1/swinunet
+For future local updates, run from this project directory:
+
+```powershell
+git add .gitignore .gitattributes README.md requirements.txt environment.yml scripts train_swin_unet_hairline.py inference
+git commit -m "Update training code"
+git push origin main
+```
+
+Do not commit the dataset, ZIP, checkpoints, or credentials. A private repository
+requires GitHub authentication when cloning (SSH key or credential helper).
+
+## Server setup (once)
+
+Connect using `ssh -p 44065 se-st126157@asl.ait.ac.th`.
+Use AIT VPN when off campus, as documented by ASL.
+
+```bash
+mkdir -p ~/projects
+cd ~/projects
+git clone https://github.com/poudelavik1/swinunet.git swinunet
+cd swinunet
+bash scripts/setup_conda.sh
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate swinunet
+```
+
+The setup installs Python 3.11 and matched PyTorch 2.9.1 / torchvision 0.24.1
+CUDA 12.6 wheels from the official PyTorch index. The GPU driver must support
+these wheels; the job tests a CUDA tensor operation before training. Override
+`TORCH_INDEX_URL` during setup if another CUDA build is required by the driver.
+Set `CONDA_SH` or `ENV_NAME` if using a different Conda installation or name.
+Installation requires internet access. The default pretrained encoder also
+requires downloaded weights in the user's torch cache on the compute node;
+if compute nodes have no internet, cache the weights from the login node first:
+
+```bash
+python -c "from torchvision.models import Swin_T_Weights; Swin_T_Weights.DEFAULT.get_state_dict(progress=True)"
+```
+
+## Submit CUDA training
+
+Replace the example dataset path with the existing server path. It must contain
+`train/images`, `train/masks`, `val/images`, `val/masks`, `test/images`, and `test/masks`.
+
+```bash
+bash scripts/submit.sh /absolute/path/to/split_80_10_10
+```
+
+Default request: ASL-gpu, one GPU, four CPU cores, 32 GB host RAM, two days.
+Submission prints the job ID, result directory, and monitoring commands.
+Each new job uses a separate output directory and does not resume old weights.
+To customize training:
+
+```bash
+EPOCHS=100 BATCH_SIZE=8 bash scripts/submit.sh /absolute/path/to/split_80_10_10
+```
+
+Reduce batch size if GPU memory is exhausted. Evaluation also uses tiled images;
+if evaluation exhausts memory, reduce `--eval-tile` in the job script.
+Early stopping defaults to 15 epochs without improvement, so training can stop
+before the requested epoch count.
+
+## Monitor performance
+
+Use the actual job ID and output path printed by the submission script:
+
+```bash
+squeue -u "$USER"
+tail -F logs/swin_unet_JOBID.out
+python scripts/monitor_epochs.py /absolute/path/to/run --watch
+cat logs/swin_unet_JOBID.err
+sacct -j JOBID --format=JobID,State,ExitCode,Elapsed,MaxRSS
+```
+
+Ctrl+C stops the viewer; the submitted job keeps running after SSH disconnects.
+The monitor prints a row only after training AND validation finish an epoch.
+Train/validation loss and validation precision, recall, F1, IoU (fixed threshold
+0.5), plus tolerant F1 at the selected threshold, are read from the flushed CSV.
+The live monitor waits until interrupted; use `sacct` to check completion/failure.
+All epoch values remain in `training_history.csv`. The trainer creates final
+plots in `plots/` and saves `best.pt` and resumable `last.pt`. Jobs record the
+Git commit and package versions in the output folder.
+
+## Resume and update
+
+Resume into the same run directory using its checkpoint:
+
+```bash
+RESUME=1 bash scripts/submit.sh /absolute/path/to/split_80_10_10 /absolute/path/to/existing/run
+```
+
+Never submit two jobs writing into the same output directory.
+Cancel a job using `scancel JOBID`. Update the repo only after active jobs finish:
+
+```bash
+git pull --ff-only
+```
+
+Run setup again if dependencies changed. On Windows, commit and push your code
+changes first. Retrieve results using PowerShell:
+
+```powershell
+scp -P 44065 -r se-st126157@asl.ait.ac.th:/absolute/path/to/run .
+```
+
+ASL instructions: https://asl.ait.ac.th/package-slurm.html
+Slurm examples: https://asl.ait.ac.th/package-script.html
+PyTorch wheels: https://pytorch.org/get-started/previous-versions/

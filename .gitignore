@@ -1,0 +1,16 @@
+split_80_10_10/
+*.zip
+datasets/
+data/
+runs/
+logs/
+swin_unet_hairline_output/
+*.pt
+*.pth
+*.out
+*.err
+.venv/
+__pycache__/
+*.pyc
+.env
+server.env
