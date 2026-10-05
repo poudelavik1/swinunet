@@ -1,0 +1,5 @@
+# Core defaults for ASL training. Other training flags can be passed on the CLI.
+[training]
+epochs = 80
+batch_size = 4
+workers = 4

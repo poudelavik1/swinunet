@@ -1,5 +1,22 @@
 # Swin U-Net hairline crack training on ASL
 
+## Project layout
+
+```text
+configs/training.toml       Core training defaults
+src/swinunet/              Data, models, losses, evaluation, plots, training
+scripts/                  Conda setup, submission, training CLI, epoch monitor
+slurm/train_swin.sbatch    ASL CUDA job
+docs/ARCHITECTURE.md       Module responsibilities and inference limitations
+tests/                    Configuration and live CSV monitoring checks
+inference/                Existing legacy inference/CAD code
+train_swin_unet_hairline.py Compatibility training entry point
+```
+
+This organization takes inspiration from https://github.com/Samir4456/pgat-length.
+The Swin U-Net training algorithms are preserved. See
+[architecture](docs/ARCHITECTURE.md) for details.
+
 The Conda environment holds Python dependencies. Clone the repository into a
 normal working directory, then activate the environment to run its code.
 The dataset already on the server is passed by its absolute path and is not uploaded to GitHub.
@@ -10,7 +27,7 @@ Repository: https://github.com/poudelavik1/swinunet
 For future local updates, run from this project directory:
 
 ```powershell
-git add .gitignore .gitattributes README.md requirements.txt environment.yml scripts train_swin_unet_hairline.py inference
+git add .gitignore .gitattributes README.md requirements.txt environment.yml pyproject.toml configs src scripts slurm docs tests train_swin_unet_hairline.py inference
 git commit -m "Update training code"
 git push origin main
 ```
@@ -48,11 +65,18 @@ python -c "from torchvision.models import Swin_T_Weights; Swin_T_Weights.DEFAULT
 
 ## Submit CUDA training
 
-Replace the example dataset path with the existing server path. It must contain
+Your uploaded dataset was extracted into `$HOME/split_80_10_10`. It must contain
 `train/images`, `train/masks`, `val/images`, `val/masks`, `test/images`, and `test/masks`.
 
 ```bash
-bash scripts/submit.sh /absolute/path/to/split_80_10_10
+bash scripts/submit.sh "$HOME/split_80_10_10"
+```
+
+Core defaults live in `configs/training.toml`. CLI flags take precedence.
+Direct training on an allocated compute node:
+
+```bash
+python scripts/train.py "$HOME/split_80_10_10" --output runs/manual --epochs 80
 ```
 
 Default request: ASL-gpu, one GPU, four CPU cores, 32 GB host RAM, two days.
@@ -63,6 +87,19 @@ To customize training:
 ```bash
 EPOCHS=100 BATCH_SIZE=8 bash scripts/submit.sh /absolute/path/to/split_80_10_10
 ```
+
+An explicitly assigned account or other authorized partition can be supplied
+without editing the job file:
+
+```bash
+SLURM_ACCOUNT=YOUR_ASSIGNED_ACCOUNT bash scripts/submit.sh "$HOME/split_80_10_10"
+SLURM_PARTITION=YOUR_AUTHORIZED_PARTITION bash scripts/submit.sh "$HOME/split_80_10_10"
+```
+
+Only use account/partition values confirmed by the administrator. Restructuring
+cannot fix a controller-side `InvalidAccount` error. Pending jobs produce no
+epoch metrics until they start. On this server `sacct` may be unavailable because
+accounting storage is not configured; use `scontrol show job JOBID` instead.
 
 Reduce batch size if GPU memory is exhausted. Evaluation also uses tiled images;
 if evaluation exhausts memory, reduce `--eval-tile` in the job script.

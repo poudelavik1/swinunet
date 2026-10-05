@@ -31,10 +31,12 @@ print('CUDA tensor check:', (torch.ones(1, device='cuda') + 1).item())
 PY
 git rev-parse HEAD > "$OUTPUT_DIR/git_commit.txt"
 python -m pip freeze > "$OUTPUT_DIR/packages.txt"
-args=("$DATASET" --output "$OUTPUT_DIR" --epochs "${EPOCHS:-80}"
-      --batch-size "${BATCH_SIZE:-4}" --workers "${WORKERS:-4}")
+args=("$DATASET" --output "$OUTPUT_DIR")
+[[ -z "${EPOCHS:-}" ]] || args+=(--epochs "$EPOCHS")
+[[ -z "${BATCH_SIZE:-}" ]] || args+=(--batch-size "$BATCH_SIZE")
+[[ -z "${WORKERS:-}" ]] || args+=(--workers "$WORKERS")
 if [[ "${RESUME:-0}" == 1 ]]; then
     test -f "$OUTPUT_DIR/last.pt" || { echo "Resume checkpoint missing" >&2; exit 1; }
     args+=(--resume)
 fi
-srun python -u train_swin_unet_hairline.py "${args[@]}"
+srun python -u scripts/train.py "${args[@]}"
