@@ -56,6 +56,9 @@ CUDA 12.6 wheels from the official PyTorch index. The GPU driver must support
 these wheels; the job tests a CUDA tensor operation before training. Override
 `TORCH_INDEX_URL` during setup if another CUDA build is required by the driver.
 Set `CONDA_SH` or `ENV_NAME` if using a different Conda installation or name.
+Jobs do not call `conda activate`, because `/opt/miniconda3` exists only on the
+login node; they put `~/.conda/envs/$ENV_NAME/bin` on `PATH` directly. Set
+`ENV_DIR` when submitting if the environment lives somewhere else.
 Installation requires internet access. Setup also downloads the default
 pretrained Swin-T encoder into `~/.cache/torch`, so compute nodes need no
 internet. Another `--encoder` needs its own weights cached from the login node.

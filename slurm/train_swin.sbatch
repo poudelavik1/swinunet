@@ -14,8 +14,12 @@ set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
 : "${DATASET:?Submit using scripts/submit.sh with the dataset path}"
 : "${OUTPUT_DIR:?OUTPUT_DIR must be set by the submission script}"
-source "${CONDA_SH:-/opt/miniconda3/etc/profile.d/conda.sh}"
-conda activate "${ENV_NAME:-swinunet}"
+# As in pgat-length: the login node's /opt/miniconda3 is not on the compute node,
+# so put the environment on PATH instead of activating it.
+ENV_DIR="${ENV_DIR:-$HOME/.conda/envs/${ENV_NAME:-swinunet}}"
+test -x "$ENV_DIR/bin/python" || { echo "Conda environment not found: $ENV_DIR" >&2; exit 1; }
+export PATH="$ENV_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$ENV_DIR/lib:${LD_LIBRARY_PATH:-}"
 export OMP_NUM_THREADS=1
 export MPLBACKEND=Agg
 export PYTHONUNBUFFERED=1
