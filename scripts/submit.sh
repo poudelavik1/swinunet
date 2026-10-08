@@ -12,6 +12,17 @@ for split in train val test; do
         test -d "$DATASET/$split/$kind" || { echo "Missing $DATASET/$split/$kind" >&2; exit 1; }
     done
 done
+if [[ -n "${SELECT_PATTERN:-}" ]]; then
+    # The trainer silently falls back to all sources when nothing matches, so check before queueing.
+    matched=$(ls "$DATASET/val/images" | grep -cE -- "$SELECT_PATTERN" || true)
+    [[ "$matched" -gt 0 ]] || { echo "SELECT_PATTERN matches no validation image: $SELECT_PATTERN" >&2; exit 1; }
+    echo "Target: $matched validation images match $SELECT_PATTERN"
+fi
+if [[ -n "${INIT_WEIGHTS:-}" ]]; then
+    # Resolve before the cd below, and fail here rather than after the queue wait.
+    INIT_WEIGHTS="$(realpath -e "$INIT_WEIGHTS")" || { echo "INIT_WEIGHTS does not exist" >&2; exit 1; }
+    export INIT_WEIGHTS
+fi
 cd "$ROOT"
 mkdir -p logs runs
 export OUTPUT_DIR="$(realpath -m "${2:-$ROOT/runs/$(date +%Y%m%d_%H%M%S)_$$}")"

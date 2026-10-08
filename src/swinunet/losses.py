@@ -30,18 +30,25 @@ def soft_cldice_loss(probability, target, iterations: int, smooth: float = 1.0):
 
 
 class HairlineCrackLoss(nn.Module):
-    """BCE + Tversky (region) + clDice (centerline continuity), valid-pixel masked."""
+    """BCE + Tversky (region) + clDice (centerline continuity), valid-pixel masked.
+
+    `label_tolerance` > 0 leaves the ring of that many pixels around every label
+    unsupervised. Labels drawn by hand (the DXF tiles) sit a few pixels off the
+    crack, so a strict loss punishes a prediction on the crack itself as a false
+    positive plus a miss; the tol_* metrics already accept a prediction that close.
+    """
 
     def __init__(
         self, bce_weight=1.0, tversky_weight=1.0, cldice_weight=0.5,
         false_positive_weight=0.4, false_negative_weight=0.6,
-        skeleton_iterations=10, auxiliary_weights=(0.4, 0.2),
+        skeleton_iterations=10, auxiliary_weights=(0.4, 0.2), label_tolerance=0,
     ):
         super().__init__()
         self.bce_weight, self.tversky_weight, self.cldice_weight = bce_weight, tversky_weight, cldice_weight
         self.fp_weight, self.fn_weight = false_positive_weight, false_negative_weight
         self.skeleton_iterations = skeleton_iterations
         self.auxiliary_weights = tuple(auxiliary_weights)
+        self.label_tolerance = int(label_tolerance)
 
     def region_loss(self, logits, target, valid):
         logits = logits.float()
@@ -59,6 +66,9 @@ class HairlineCrackLoss(nn.Module):
 
     def forward(self, outputs, target, valid, cldice_scale: float = 1.0):
         logits, auxiliary = outputs if isinstance(outputs, tuple) else (outputs, ())
+        if self.label_tolerance > 0:
+            ring = F.max_pool2d(target, 2 * self.label_tolerance + 1, 1, self.label_tolerance) - target
+            valid = valid * (1 - ring)
         loss, probability, target_valid = self.region_loss(logits, target, valid)
         weight = self.cldice_weight * cldice_scale
         if weight > 0:

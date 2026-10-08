@@ -39,6 +39,12 @@ args=("$DATASET" --output "$OUTPUT_DIR")
 [[ -z "${EPOCHS:-}" ]] || args+=(--epochs "$EPOCHS")
 [[ -z "${BATCH_SIZE:-}" ]] || args+=(--batch-size "$BATCH_SIZE")
 [[ -z "${WORKERS:-}" ]] || args+=(--workers "$WORKERS")
+[[ -z "${SELECT_PATTERN:-}" ]] || args+=(--select-pattern "$SELECT_PATTERN")
+[[ -z "${TARGET_WEIGHT:-}" ]] || args+=(--target-weight "$TARGET_WEIGHT")
+[[ -z "${LEARNING_RATE:-}" ]] || args+=(--learning-rate "$LEARNING_RATE")
+[[ -z "${LABEL_TOLERANCE:-}" ]] || args+=(--label-tolerance "$LABEL_TOLERANCE")
+[[ -z "${INIT_WEIGHTS:-}" ]] || args+=(--init-weights "$INIT_WEIGHTS")
+[[ -z "${SAVE_PREDICTIONS:-}" ]] || args+=(--save-predictions "$SAVE_PREDICTIONS")
 if [[ "${RESUME:-0}" == 1 ]]; then
     test -f "$OUTPUT_DIR/last.pt" || { echo "Resume checkpoint missing" >&2; exit 1; }
     args+=(--resume)

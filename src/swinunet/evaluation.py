@@ -1,7 +1,7 @@
 'Evaluation for hairline crack segmentation.'
 
 from __future__ import annotations
-from .common import COUNT_NAMES, F, METRIC_NAMES, Path, cv2, np, torch
+from .common import COUNT_NAMES, F, METRIC_NAMES, Path, cv2, defaultdict, np, torch
 
 class ThresholdSweep:
     """Accumulate per-source counts for all thresholds in one pass.
@@ -166,15 +166,38 @@ def evaluate(model, loader, device, sweep: ThresholdSweep, use_amp: bool,
     return total_loss / max(1, samples)
 
 
+def spread_over_sources(domain_ids, limit: int) -> set[int]:
+    """Up to `limit` dataset indices, shared evenly between the sources and evenly spaced within each.
+
+    The evaluation loader groups images by size, so the first `limit` images all
+    come from one source (40 of 40 overlays were EH104 tiles).
+    """
+    members = defaultdict(list)
+    for index, domain in enumerate(domain_ids):
+        members[domain].append(index)
+    quotas = dict.fromkeys(members, 0)
+    for _ in range(limit):  # one more for the source with the fewest so far, while it has images left
+        unfilled = [domain for domain in members if quotas[domain] < len(members[domain])]
+        if not unfilled:
+            break
+        quotas[min(unfilled, key=lambda domain: (quotas[domain], domain))] += 1
+    return {members[domain][position * len(members[domain]) // quota]
+            for domain, quota in quotas.items() for position in range(quota)}
+
+
 def prediction_writer(dataset, directory: Path, limit: int, threshold: float):
-    """Save probability maps and overlays: yellow = hit, red = false positive, green = missed."""
+    """Save probability maps and overlays: yellow = hit, red = false positive, green = missed.
+
+    `limit` images are saved, spread over every source; a limit of at least the
+    dataset size saves them all.
+    """
     directory.mkdir(parents=True, exist_ok=True)
-    written = [0]
+    selected = spread_over_sources(dataset.domain_ids, limit)
 
     def write(images, probabilities, masks, indices):
         for image, probability, mask, index in zip(images, probabilities, masks, indices.tolist()):
-            if written[0] >= limit:
-                return
+            if index not in selected:
+                continue
             height, width = dataset.shapes[index]
             rgb = (image[:, :height, :width].float().permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
             probability = probability[0, :height, :width].cpu().numpy()
@@ -187,7 +210,6 @@ def prediction_writer(dataset, directory: Path, limit: int, threshold: float):
             cv2.imwrite(str(directory / f"{stem}_probability.png"), (probability * 255).astype(np.uint8))
             cv2.imwrite(str(directory / f"{stem}_overlay.png"),
                         cv2.cvtColor(np.hstack((rgb, overlay)), cv2.COLOR_RGB2BGR))
-            written[0] += 1
 
     return write
 
@@ -196,4 +218,4 @@ def prediction_writer(dataset, directory: Path, limit: int, threshold: float):
 # Tables and figures: loss/metric curves, threshold sweep, PR, ROC, confusion matrix
 # --------------------------------------------------------------------------- #
 
-__all__ = ['ThresholdSweep', 'metrics_from_counts', 'basic_metrics', 'confusion_from_counts', 'at_threshold', 'tile_origins', 'predict_logits', 'predict_probabilities', 'evaluate', 'prediction_writer']
+__all__ = ['ThresholdSweep', 'metrics_from_counts', 'basic_metrics', 'confusion_from_counts', 'at_threshold', 'tile_origins', 'predict_logits', 'predict_probabilities', 'evaluate', 'spread_over_sources', 'prediction_writer']

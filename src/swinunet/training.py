@@ -64,6 +64,13 @@ Target and evaluation (changed from ``train_unet_hairline.py``):
   a side above ``--eval-tile`` (1024 px) is evaluated as overlapping tiles whose
   logits are blended; smaller images still run whole.
 * EMA weights, flip TTA, per-source metrics, and resumable checkpoints.
+* ``validation_by_source.csv`` records every validation source at every epoch.
+  The pooled metrics are summed over pixels, so the thick-crack sources dominate
+  them and can hide a source the model fails on (the run of 2026-10-06: pooled
+  test tol-F1 0.83, RAMA8 East 0.19).
+* ``--init-weights best.pt`` fine-tunes an earlier model on new data, and
+  ``--label-tolerance N`` leaves an N-pixel ring around every label out of the
+  loss, for labels drawn a few pixels off the crack.
 
 Figures and tables are written to ``<output>/plots`` after training:
 loss curves, training-vs-validation precision/recall/F1/IoU/accuracy (both at
@@ -76,7 +83,7 @@ numbers in ``evaluation_curves.csv`` and ``confusion_matrices.json``.
 """
 
 from __future__ import annotations
-from .common import BASIC_METRICS, Counter, DEFAULT_DATASET_PATH, DEFAULT_OUTPUT_PATH, DataLoader, METRIC_NAMES, Path, SWIN_ENCODERS, WeightedRandomSampler, argparse, csv, defaultdict, json, math, nn, np, os, random, re, seed_everything, seed_worker, sys, time, torch
+from .common import BASIC_METRICS, COUNT_NAMES, Counter, DEFAULT_DATASET_PATH, DEFAULT_OUTPUT_PATH, DataLoader, METRIC_NAMES, Path, SWIN_ENCODERS, WeightedRandomSampler, argparse, csv, defaultdict, json, math, nn, np, os, random, re, seed_everything, seed_worker, sys, time, torch
 from .data import AugmentationOptions, CrackSegmentationDataset, collect_pairs, shape_grouped_batches, source_family
 from .models import HairlineSwinUNet, ModelEMA
 from .losses import HairlineCrackLoss
@@ -112,12 +119,45 @@ def json_safe(value):
     return json.loads(json.dumps(value, default=str))
 
 
+def save_checkpoint(state, path: Path) -> None:
+    """Write to a temporary file, then rename it over `path`.
+
+    A job killed while saving (time limit, scancel) then leaves the previous
+    checkpoint intact instead of a truncated file that cannot be resumed.
+    """
+    temporary = path.with_name(path.name + ".tmp")
+    torch.save(state, temporary)
+    os.replace(temporary, path)
+
+
+def open_epoch_log(path: Path, fields, first_epoch: int):
+    """Open a per-epoch CSV (epoch in the first column) for the rows from `first_epoch` on.
+
+    A fresh run starts the file. A resumed run keeps the rows of the epochs before
+    `first_epoch` and drops later ones: a job killed between writing an epoch's
+    row and saving last.pt repeats that epoch, which would otherwise be logged twice.
+    """
+    rows = []
+    if first_epoch > 1 and path.is_file():
+        with path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+        rows = rows[:1] + [row for row in rows[1:] if row and row[0].isdigit() and int(row[0]) < first_epoch]
+    handle = path.open("w", newline="", encoding="utf-8")
+    csv.writer(handle).writerows(rows or [list(fields)])
+    handle.flush()
+    return handle
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("dataset", nargs="?", type=Path, default=DEFAULT_DATASET_PATH,
                         help=f"80/10/10 dataset root (default: {DEFAULT_DATASET_PATH})")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--resume", action="store_true", help="Continue from <output>/last.pt")
+    parser.add_argument("--init-weights", type=Path,
+                        help="Start from the weights of an earlier run's best.pt instead of ImageNet, to "
+                             "fine-tune on new data. The run itself is fresh (new schedule, EMA and "
+                             "history); not used when --resume continues from last.pt")
     parser.add_argument("--evaluate-only", action="store_true",
                         help="No training: evaluate <output>/best.pt on validation and test and write the "
                              "figures, curves and confusion matrices to <output>/plots (other files untouched)")
@@ -160,6 +200,10 @@ def parse_arguments():
                         help="> false-positive weight favours recall of faint cracks")
     parser.add_argument("--skeleton-iterations", type=int, default=10)
     parser.add_argument("--aux-weights", type=float, nargs=2, default=(0.4, 0.2))
+    parser.add_argument("--label-tolerance", type=int, default=0,
+                        help="Leave the ring of this many pixels around every label out of the loss: "
+                             "hand-drawn labels sit a few pixels off the crack, and the tol_* metrics "
+                             "already accept a prediction that close. 0 = strict loss (default)")
     # Evaluation
     parser.add_argument("--tolerance", type=int, default=2, help="Pixel tolerance for tol_* metrics")
     parser.add_argument("--select-metric", choices=METRIC_NAMES, default="tol_f1",
@@ -177,7 +221,9 @@ def parse_arguments():
                              "tiles of this size, because full-resolution photos do not fit in memory "
                              "whole. Smaller images still run whole; 0 disables tiling")
     parser.add_argument("--eval-tile-overlap", type=int, default=128, help="Overlap of those tiles in pixels")
-    parser.add_argument("--save-predictions", type=int, default=40, help="Test overlays to save")
+    parser.add_argument("--save-predictions", type=int, default=40,
+                        help="Test overlays to save, spread evenly over the sources; a number at least "
+                             "the size of the test set saves every image")
     parser.add_argument("--max-train-samples", type=int, default=0, help="Debug: subsample train")
     parser.add_argument("--max-eval-samples", type=int, default=0, help="Debug: subsample val/test")
     # Augmentation
@@ -227,6 +273,10 @@ def parse_arguments():
         parser.error("Contrast changes must satisfy 0 <= --contrast-min-change <= --contrast-max-change < 1.")
     if args.contrast_step <= 0:
         parser.error("--contrast-step must be greater than zero.")
+    if args.label_tolerance < 0:
+        parser.error("--label-tolerance must not be negative.")
+    if args.init_weights is not None and not args.evaluate_only and not args.init_weights.is_file():
+        parser.error(f"--init-weights file not found: {args.init_weights}")
     return args
 
 
@@ -325,7 +375,19 @@ def main():
     }}
     if args.evaluate_only:  # rebuild exactly what was trained; its weights come from best.pt
         architecture = torch.load(best_path, map_location="cpu", weights_only=False)["architecture"]
-    model = HairlineSwinUNet(pretrained=not (args.no_pretrained or args.evaluate_only), **architecture["kwargs"])
+    initial = None
+    if args.init_weights is not None and not args.evaluate_only and not (args.resume and last_path.is_file()):
+        initial = torch.load(args.init_weights, map_location="cpu", weights_only=False)
+        if initial["architecture"] != architecture:
+            raise SystemExit(f"--init-weights holds a different network ({initial['architecture']['kwargs']}); "
+                             f"this run builds {architecture['kwargs']}. Pass the matching model options.")
+    model = HairlineSwinUNet(pretrained=not (args.no_pretrained or args.evaluate_only or initial is not None),
+                             **architecture["kwargs"])
+    if initial is not None:
+        model.load_state_dict(initial["model"])
+        print(f"Initial weights: {args.init_weights} (epoch {initial.get('epoch')}, "
+              f"{initial.get('select_metric')} {initial.get('best_val_score', float('nan')):.4f})")
+        del initial
     model = model.to(device, memory_format=torch.channels_last)
     ema = ModelEMA(model, args.ema_decay) if args.ema_decay > 0 else None
     optimizer = torch.optim.AdamW(
@@ -339,7 +401,7 @@ def main():
     loss_function = HairlineCrackLoss(
         args.bce_weight, args.tversky_weight, args.cldice_weight,
         args.false_positive_weight, args.false_negative_weight,
-        args.skeleton_iterations, args.aux_weights,
+        args.skeleton_iterations, args.aux_weights, args.label_tolerance,
     )
     thresholds = np.round(np.arange(0.05, 0.951, 0.025), 3)
     sweep = ThresholdSweep(thresholds, args.tolerance, len(domains), device)
@@ -381,13 +443,18 @@ def main():
               *(f"train_{name}" for name in BASIC_METRICS), *(f"val_{name}" for name in BASIC_METRICS),
               "threshold", *METRIC_NAMES, "all_val_f1", "all_val_tol_f1", "seconds"]
     history_path = args.output / "training_history.csv"
-    resuming_history = args.resume and start_epoch > 1 and history_path.is_file()
+    # One row per validation source and epoch, at that epoch's selected threshold; best_* is
+    # the source's own optimum. The pooled history hides a source the model fails on.
+    source_path = args.output / "validation_by_source.csv"
+    source_fields = ["epoch", "source", "images", "target", "threshold", *METRIC_NAMES,
+                     "best_threshold", f"best_{args.select_metric}"]
+    val_sources = sorted(set(datasets["val"].domain_ids))
+    labelled_column = COUNT_NAMES.index("labelled")
     half_index = int(np.argmin(np.abs(thresholds - 0.5)))
     if not args.evaluate_only:
-        with history_path.open("a" if resuming_history else "w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields)
-            if not resuming_history:
-                writer.writeheader()
+        with open_epoch_log(history_path, fields, start_epoch) as handle, \
+                open_epoch_log(source_path, source_fields, start_epoch) as source_handle:
+            writer, source_writer = csv.DictWriter(handle, fieldnames=fields), csv.writer(source_handle)
             for epoch in range(start_epoch, args.epochs + 1):
                 started = time.time()
                 model.train()
@@ -441,6 +508,20 @@ def main():
                 }
                 writer.writerow(row)
                 handle.flush()
+                source_scores = []  # (score at the selected threshold, name) of target sources with labels
+                for domain_id in val_sources:
+                    name, source_counts = domains[domain_id], sweep.count_array([domain_id])
+                    source_metrics = metrics_from_counts(source_counts)
+                    own_index = int(np.argmax(source_metrics[args.select_metric]))
+                    source_writer.writerow([
+                        epoch, name, counts["val"][name], int(name in target_domains),
+                        f"{thresholds[best_index]:.3f}",
+                        *(f"{source_metrics[metric][best_index]:.5f}" for metric in METRIC_NAMES),
+                        f"{thresholds[own_index]:.3f}", f"{source_metrics[args.select_metric][own_index]:.5f}",
+                    ])
+                    if name in target_domains and source_counts[0, labelled_column] > 0:
+                        source_scores.append((float(source_metrics[args.select_metric][best_index]), name))
+                source_handle.flush()
                 improved = score > best_score
                 print(
                     f"Epoch {epoch:03d}/{args.epochs} | loss {row['train_loss']:.4f}/{val_loss:.4f} | "
@@ -448,9 +529,12 @@ def main():
                     f"F1 {row['f1']:.4f} IoU {row['iou']:.4f} | tolF1 {row['tol_f1']:.4f} | "
                     f"{row['seconds']:.0f}s{'  *best*' if improved else ''}"
                 )
+                if len(source_scores) > 1:
+                    print(f"    weakest sources ({args.select_metric}): "
+                          + " | ".join(f"{name} {value:.3f}" for value, name in sorted(source_scores)[:3]))
                 if improved:
                     best_score, best_epoch, stale = score, epoch, 0
-                    torch.save({
+                    save_checkpoint({
                         "model": evaluation_model.state_dict(), "architecture": architecture,
                         "arguments": json_safe(vars(args)), "epoch": epoch,
                         "best_val_score": best_score, "select_metric": args.select_metric,
@@ -458,7 +542,7 @@ def main():
                     }, best_path)
                 else:
                     stale += 1
-                torch.save({
+                save_checkpoint({
                     "model": model.state_dict(), "ema": ema.module.state_dict() if ema is not None else None,
                     "ema_updates": ema.updates if ema is not None else 0,
                     "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
@@ -493,7 +577,7 @@ def main():
         index = int(np.argmax(metrics[args.select_metric]))
         stored = checkpoint.get("optimal_threshold_tta" if tta else "optimal_threshold")
         if args.evaluate_only and stored is not None:
-            # Report at the threshold the training run calibrated (and the detector uses).
+            # Report at the threshold the training run calibrated.
             # Recalibrating on another machine can move it by a grid step, because the
             # validation curve is flat near its maximum and CPU/GPU precision differs.
             index = int(np.argmin(np.abs(thresholds - stored)))
@@ -517,7 +601,7 @@ def main():
             str(tta): {name: calibration[tta][1][name].tolist() for name in METRIC_NAMES} for tta in calibration
         }
         checkpoint["thresholds"] = thresholds.tolist()
-        torch.save(checkpoint, best_path)
+        save_checkpoint(checkpoint, best_path)
 
     results = {
         "best_epoch": checkpoint["epoch"], "select_metric": args.select_metric,
@@ -554,4 +638,5 @@ def main():
 
 
 
-__all__ = ['parameter_groups', 'warmup_cosine', 'json_safe', 'parse_arguments', 'main']
+__all__ = ['parameter_groups', 'warmup_cosine', 'json_safe', 'save_checkpoint', 'open_epoch_log',
+           'parse_arguments', 'main']

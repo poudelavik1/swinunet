@@ -8,9 +8,9 @@ src/swinunet/              Data, models, losses, evaluation, plots, training
 scripts/                  Conda setup, submission, training CLI, epoch monitor
 slurm/train_swin.sbatch    ASL CUDA training job
 slurm/gpu_check.sbatch     Ten-minute GPU and environment check
-docs/ARCHITECTURE.md       Module responsibilities and inference limitations
+docs/ARCHITECTURE.md       Module responsibilities and inference notes
 tests/                    Configuration and live CSV monitoring checks
-inference/                Existing legacy inference/CAD code
+inference/                Crack detection and AutoCAD drawing
 train_swin_unet_hairline.py Compatibility training entry point
 ```
 
@@ -104,6 +104,31 @@ To customize training:
 EPOCHS=100 BATCH_SIZE=8 bash scripts/submit.sh /absolute/path/to/split_80_10_10
 ```
 
+By default the best checkpoint and the threshold are chosen on the validation
+images of every source pooled by pixel, which the thick-crack sources dominate.
+`SELECT_PATTERN` (a regex on validation file names) chooses them on a target
+source instead and samples that source's training images `TARGET_WEIGHT` times
+as often (default 1.5). Test metrics are still reported pooled and per source.
+For the row/column tiles (`EH104_r0005_c0056`, `F4_...`, `RAMA8_EAST-...`):
+
+```bash
+SELECT_PATTERN='_r[0-9]+_c[0-9]+' bash scripts/submit.sh "$HOME/split_80_10_10"
+```
+
+Write the pattern with `[0-9]` rather than `\d`: the submission script checks it
+with `grep -E` before queueing and the trainer applies it as a Python regex.
+
+`INIT_WEIGHTS` starts a new run from an earlier run's `best.pt` instead of
+ImageNet (fine-tuning on new data; use a lower `LEARNING_RATE`, the default is
+2e-4). `LABEL_TOLERANCE=2` leaves a 2-pixel ring around every label out of the
+loss, for hand-drawn labels that sit a few pixels off the crack; it has not yet
+been compared against the strict loss (0, the default) on a full run.
+
+```bash
+INIT_WEIGHTS=/absolute/path/to/earlier/run/best.pt LEARNING_RATE=5e-5 \
+  bash scripts/submit.sh "$HOME/split_80_10_10"
+```
+
 An explicitly assigned account or other authorized partition can be supplied
 without editing the job file:
 
@@ -139,7 +164,11 @@ The monitor prints a row only after training AND validation finish an epoch.
 Train/validation loss and validation precision, recall, F1, IoU (fixed threshold
 0.5), plus tolerant F1 at the selected threshold, are read from the flushed CSV.
 The live monitor waits until interrupted; use `sacct` to check completion/failure.
-All epoch values remain in `training_history.csv`. The trainer creates final
+All epoch values remain in `training_history.csv`, and `validation_by_source.csv`
+holds the same metrics for every source separately (the log prints the three
+weakest after each epoch). The test overlays in `test_predictions/` are spread
+over every source; `SAVE_PREDICTIONS=5000` saves one for every test image
+(default 40). The trainer creates final
 plots in `plots/` and saves `best.pt` and resumable `last.pt`. Jobs record the
 Git commit and package versions in the output folder.
 
