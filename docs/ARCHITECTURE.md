@@ -27,14 +27,17 @@ The dataset stays outside the repository and is supplied by absolute path.
 Each fresh job writes into its own `runs/` directory. Resume uses the same
 directory with `RESUME=1`. Do not run concurrent jobs into one output folder.
 
-## Existing inference limitation
+## Inference and AutoCAD
 
-The separate legacy `inference/hairline_crack_detection.py` imports
-`train_unet_hairline` and `zhang_suen_thinning`, which are not supplied here.
-It describes a different U-Net inference pipeline and is not wired to the
-Swin model. It is retained as existing work; it is not a verified Swin inference
-entry point. Swin training's own evaluation and predictions use the packaged
-evaluation code.
+`inference/hairline_crack_detection.py` loads a Swin checkpoint through
+`swinunet.models.load_model_from_checkpoint` and thins the mask with
+`inference/zhang_suen_thinning.py`. It reads `inference/best.pt` unless
+`--model` is given, and `inference/cracks_to_autocad.py` runs it before drawing
+the crack polylines in AutoCAD. Its tile size, GPU batch sizing and line filters
+were tuned on the earlier ResNet U-Net and have not been re-tuned for the Swin
+model; the line filters are off by default. The threshold stored in `best.pt`
+was calibrated on all sources pooled, which is too high for faint cracks on the
+row/column tiles, so the detector uses 0.5 unless `--threshold` is given.
 
 Repository restructuring does not address the server's `InvalidAccount`
 scheduler error. CUDA execution must be verified on an allocated compute node.

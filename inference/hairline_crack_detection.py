@@ -11,13 +11,20 @@ Pipeline
    overlapping tiles blended with cosine weights (no seams). Memory sets the
    batch size. Images are never resized: the model was trained on
    native-resolution pixels, and downscaling would erase hairline cracks.
-3. Run the HairlineUNet trained by ``train_unet_hairline.py`` and threshold the
-   stitched probability map with the validation-calibrated threshold stored in
-   ``best.pt``; a small morphological closing bridges 1-3 px gaps.
+3. Run the HairlineSwinUNet trained by ``scripts/train.py`` (the ``swinunet``
+   package in ``src``) and threshold the stitched probability map
+   (``DEFAULT_THRESHOLD`` unless ``--threshold`` is given); a small
+   morphological closing bridges 1-3 px gaps.
 4. Zhang-Suen thinning (``zhang_suen_thinning.py``) in haloed tiles gives a
    one-pixel skeleton.
-5. The skeleton is traced into a graph of branches, and lines that are not
-   cracks are removed:
+5. The skeleton is traced into a graph of branches. Burrs shorter than
+   ``--spur-length`` and cracks shorter than ``--min-crack-length`` are
+   removed. Two further filters remove lines that are not cracks. They are off
+   by default: they were tuned on lab specimens with drawn grids, and on
+   in-situ concrete (formwork board marks, straight cracks running along them)
+   they deleted most of the real cracks. Turn them on for gridded specimens
+   with ``--straight-line-length 500 --straight-segment-length 100
+   --isolated-crack-length 150``.
    * Ruled lines (pencil grids, chalk lines, formwork and specimen edges).
      Long straight lines (>= ``--straight-line-length`` px) are found both in
      the crack mask (Hough transform) and in the photograph itself (thin dark
@@ -32,10 +39,6 @@ Pipeline
      crack shorter than ``--isolated-crack-length`` is dropped unless it lies
      beside a longer crack or continues one across a gap (surface marks,
      recess edges, wood grain). ``removed_isolated_pieces.png`` shows them.
-   * Burrs shorter than ``--spur-length`` and cracks shorter than
-     ``--min-crack-length``.
-   Set ``--straight-line-length 0 --straight-segment-length 0
-   --isolated-crack-length 0`` to keep everything.
 6. Ramer-Douglas-Peucker (RDP) reduces every branch to a few vertices.
 7. CSV files hold the dense skeleton coordinates and the RDP polylines in CAD
    coordinates (origin bottom-left, ``--scale`` units per pixel), readable by
@@ -70,20 +73,29 @@ import torch
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIRECTORY))
-sys.path.insert(1, str(SCRIPT_DIRECTORY.parent))  # helper modules live one level up
+sys.path.insert(1, str(SCRIPT_DIRECTORY.parent / "src"))  # the swinunet package
 from cracks_to_autocad import add_autocad_arguments  # noqa: E402
-from train_unet_hairline import load_model_from_checkpoint  # noqa: E402
+from swinunet.models import load_model_from_checkpoint  # noqa: E402
 from zhang_suen_thinning import zhang_suen  # noqa: E402
 
 DEFAULT_MODEL_PATH = SCRIPT_DIRECTORY / "best.pt"
+# Probability threshold used unless --threshold is given. best.pt stores the value
+# that maximised tolerance-F1 on the validation crops (0.875), but that curve is flat
+# from 0.5 upwards (0.819 vs 0.828) and field images score lower. Against the manual
+# crack drawings of two RAMA8 pylon orthomosaic tiles (1.9 mm/px, 10 px tolerance,
+# ruled-line and isolated-piece filters off), 0.5 found 23-34 % of the manual crack
+# length and 0.875 found 16-24 %, at the same F1 (0.20-0.23).
+DEFAULT_THRESHOLD = 0.6
 # Tile = CONTEXT_FACTOR x the model's training crop. The decoder's scSE attention
 # pools over the whole input, so predictions depend on the tile size; it must
 # therefore stay fixed rather than grow with the image. On a facade crop, 256 px
 # tiles flagged pencil grid lines as cracks, whole-image passes dropped faint
-# cracks, and 512 px (2 x 256) balanced the two.
+# cracks, and 512 px (2 x 256) balanced the two. (Measured with the earlier
+# HairlineUNet; the Swin model keeps the scSE head but was not re-tuned.)
 CONTEXT_FACTOR = 2
 # GPU memory per input pixel for fp16 HairlineUNet inference, with a safety
-# margin (CPU fp32 peaks measured <= ~1 KB/px). Used only to size GPU batches.
+# margin (CPU fp32 peaks measured <= ~1 KB/px). Used only to size GPU batches;
+# not re-measured for the Swin model, so pass --batch-size 1 if a GPU runs out.
 CUDA_BYTES_PER_PIXEL = 1300
 OFFSETS = tuple((dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0))
 
@@ -783,9 +795,11 @@ def save_preview(path: Path, rgb, simplified, max_side: int = 4000):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("image", nargs="?", type=Path, help="Input image; omit to choose in a dialog")
-    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH, help="best.pt from train_unet_hairline.py")
+    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH, help="best.pt from a Swin U-Net training run")
     parser.add_argument("--output", type=Path, help="Output folder (default: <image>_crack_detection)")
-    parser.add_argument("--threshold", type=float, help="Probability threshold (default: calibrated value in best.pt)")
+    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
+                        help=f"Probability threshold (default: {DEFAULT_THRESHOLD}; the validation-calibrated "
+                             "value stored in best.pt is printed for comparison)")
     parser.add_argument("--tta", action="store_true", help="Average 4 flipped predictions (4x slower)")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--tile-size", type=int, help="Override the automatic tile size (pixels)")
@@ -797,20 +811,21 @@ def parse_args(argv=None):
                         help="Prune endpoint-to-junction burrs shorter than this many pixels (default: 10)")
     parser.add_argument("--min-crack-length", type=float, default=20.0,
                         help="Drop connected cracks shorter than this many pixels (default: 20)")
-    parser.add_argument("--isolated-crack-length", type=float,
+    parser.add_argument("--isolated-crack-length", type=float, default=0.0,
                         help="Drop cracks shorter than this many pixels unless they lie beside a crack at "
-                             "least that long (surface marks, recess edges, leftover dashes). 0 disables. "
-                             "Default: 150, or 5%% of the longer image side if that is smaller")
+                             "least that long (surface marks, recess edges, leftover dashes). 0 disables "
+                             "(default: 0; 150 suits gridded lab specimens)")
     parser.add_argument("--isolated-distance", type=int, default=60,
                         help="A short crack within this many pixels of a long one is kept as its "
                              "continuation across a gap (default: 60)")
-    parser.add_argument("--straight-line-length", type=int, default=500,
+    parser.add_argument("--straight-line-length", type=int, default=0,
                         help="Remove skeleton branches on straight lines at least this long (pencil grids, "
                              "reference lines, formwork edges), found both in the crack mask and in the "
-                             "photograph itself; 0 disables (default: 500)")
-    parser.add_argument("--straight-segment-length", type=float, default=100.0,
+                             "photograph itself; 0 disables (default: 0; 500 suits gridded lab specimens)")
+    parser.add_argument("--straight-segment-length", type=float, default=0.0,
                         help="Also remove any branch at least this long that stays within 1.5 px (or 1%% "
-                             "of its length) of a straight line: ruled-line fragments; 0 disables (default: 100)")
+                             "of its length) of a straight line: ruled-line fragments; 0 disables "
+                             "(default: 0; 100 suits gridded lab specimens)")
     parser.add_argument("--epsilon", type=float, default=2.0, help="RDP tolerance in pixels (default: 2)")
     parser.add_argument("--scale", type=float, default=1.0, help="CAD units per pixel (default: 1)")
     parser.add_argument("--reuse-probability", action="store_true",
@@ -844,7 +859,7 @@ def main(args=None) -> Path:
     model, checkpoint = load_model_from_checkpoint(args.model, device)
     model = model.to(memory_format=torch.channels_last)
     stored = checkpoint.get("optimal_threshold_tta" if args.tta else "optimal_threshold")
-    threshold = args.threshold if args.threshold is not None else float(stored if stored is not None else 0.5)
+    threshold = args.threshold
 
     rgb, valid = read_image(image_path)
     height, width = rgb.shape[:2]
@@ -855,7 +870,8 @@ def main(args=None) -> Path:
     print(f"Tiling: {plan['tile_width']} x {plan['tile_height']} px tiles, overlap {plan['overlap']} px, "
           f"{plan['columns']} x {plan['rows']} = {plan['tiles']} tiles, batch {plan['batch_size']} "
           f"on {device.type} ({plan['reason']})")
-    print(f"Threshold: {threshold:.3f}{' (flip TTA)' if args.tta else ''}")
+    print(f"Threshold: {threshold:.3f}{' (flip TTA)' if args.tta else ''}"
+          f"{f'  (best.pt validation value: {float(stored):.3f})' if stored is not None else ''}")
     timings["load"] = time.time() - started
 
     step = time.time()
@@ -911,8 +927,7 @@ def main(args=None) -> Path:
         save_image(output / "removed_straight_lines.png", removed_image)
         del removed_image
     del line_band
-    isolated_length = (args.isolated_crack_length if args.isolated_crack_length is not None
-                       else min(150.0, 0.05 * max(height, width)))
+    isolated_length = args.isolated_crack_length
     isolated = []
     if isolated_length > 0:
         dense, isolated = drop_isolated_pieces(dense, skeleton.shape, isolated_length, args.isolated_distance)

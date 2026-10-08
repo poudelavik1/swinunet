@@ -8,13 +8,13 @@ configs/             Training defaults
 src/swinunet/        Data, model, loss, evaluation, plotting, training modules
 scripts/             Conda setup, training CLI, submission, epoch monitoring
 slurm/               ASL GPU check and training jobs
-inference/           Existing legacy CAD/inference work
+inference/           Crack detection with a trained model and AutoCAD drawing
 tests/               Workflow checks
 docs/               Architecture and server guide
 ```
 
 - [ASL setup, submission, monitoring, and resume](docs/ASL_SETUP.md)
-- [Architecture and existing inference limitations](docs/ARCHITECTURE.md)
+- [Architecture and inference](docs/ARCHITECTURE.md)
 - [Training defaults](configs/training.toml)
 
 ## Existing server checkout
